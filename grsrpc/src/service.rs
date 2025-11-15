@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use futures_channel::oneshot;
 
 pub trait Service {

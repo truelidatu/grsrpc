@@ -1,0 +1,24 @@
+[package]
+name = "grsrpc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+bincode = "1.3.3"
+futures-channel = "0.3.30"
+futures-core = "0.3.30"
+futures-util = { version = "0.3.30", features = ["channel", "sink"] }
+serde = { version = "1.0.193", features = ["derive"] }
+grsrpc-macro = { path = "../grsrpc-macro", optional = true }
+
+[features]
+default = []
+macros = ["grsrpc-macro"]

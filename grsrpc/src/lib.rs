@@ -1,10 +1,5 @@
 use std::{
-    cell::RefCell,
-    collections::VecDeque,
-    marker::PhantomData,
-    pin::Pin,
-    rc::Rc,
-    task::{Context, Poll},
+    cell::RefCell, collections::VecDeque, future::Future, marker::PhantomData, pin::Pin, rc::Rc, task::{Context, Poll}
 };
 
 use futures_core::{Stream, future::LocalBoxFuture};
@@ -15,6 +10,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 pub mod client;
 pub mod service;
 pub mod task_set;
+
+// pub mod serde { pub use ::serde::*; }
 
 #[doc(hidden)]
 pub use bincode;
@@ -28,6 +25,9 @@ pub use futures_util;
 // pub use pin_utils;
 #[doc(hidden)]
 pub use serde;
+
+#[cfg(feature = "macros")]
+pub use grsrpc_macro::service;
 
 #[doc(hidden)]
 #[derive(Serialize, Deserialize)]
