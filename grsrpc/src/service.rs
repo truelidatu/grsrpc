@@ -6,10 +6,18 @@ pub trait Service {
     type Request;
     type Response;
 
-    fn execute(
+    fn execute_async(
         &self,
         seq_id: usize,
         abort_rx: oneshot::Receiver<()>,
         request: Self::Request,
     ) -> impl Future<Output = (usize, Option<Self::Response>)>;
+
+    fn execute(
+        &self,
+        seq_id: usize,
+        request: Self::Request,
+    ) -> (usize, Option<Self::Response>);
+
+    fn is_async_request(request: &Self::Request) -> bool;
 }

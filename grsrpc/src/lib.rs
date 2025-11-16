@@ -1,12 +1,19 @@
 use std::{
-    cell::RefCell, collections::VecDeque, future::Future, marker::PhantomData, pin::Pin, rc::Rc, task::{Context, Poll}
+    cell::RefCell,
+    collections::VecDeque,
+    future::Future,
+    marker::PhantomData,
+    pin::Pin,
+    rc::Rc,
+    task::{Context, Poll},
 };
 
-use futures_core::{Stream, future::LocalBoxFuture};
+use futures_core::{future::LocalBoxFuture, Stream};
+use futures_util::{stream::FuturesUnordered, SinkExt};
 use futures_util::{FutureExt, Sink};
-use futures_util::{SinkExt, stream::FuturesUnordered};
 use futures_util::{StreamExt, TryFutureExt};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashMap;
 pub mod client;
 pub mod service;
 pub mod task_set;
@@ -21,8 +28,8 @@ pub use futures_channel;
 pub use futures_core;
 #[doc(hidden)]
 pub use futures_util;
-// #[doc(hidden)]
-// pub use pin_utils;
+#[doc(hidden)]
+pub use pin_utils;
 #[doc(hidden)]
 pub use serde;
 
@@ -136,7 +143,7 @@ where
         // let mut task_set_handle_clone = task_set_handle.clone();
         let transport_outgoing = async move {
             loop {
-                let maybe_msg = futures_util::select! {
+                futures_util::select! {
                     maybe_req = request_rx.next() => {
                         if let Some((seq_id, msg)) = maybe_req {
                             // TODO: optimize, serialize on client rpc fn to avoid copy?
@@ -152,7 +159,6 @@ where
                     maybe_abort = abort_rx.next() => {
                         if let Some(seq_id) = maybe_abort {
                             let msg = bincode::serialize(&Message::<<C as client::Client>::Request, ()>::Abort(seq_id)).unwrap();
-                            // transport_tx.send(msg).await;
                             transport_tx.send(msg).await;
                         }
                     }
@@ -193,6 +199,9 @@ where
             futures_channel::mpsc::unbounded::<(usize, Option<<S as service::Service>::Response>)>(
             );
 
+        let server_tasks: Rc<RefCell<HashMap<usize, futures_channel::oneshot::Sender<_>>>> =
+            Default::default();
+        let server_tasks_cloned = server_tasks.clone();
         let service = Rc::new(service);
         let mut task_set_handle_clone = task_set_handle.clone();
         let transport_incoming = async move {
@@ -201,34 +210,49 @@ where
                     .unwrap()
                 {
                     Message::Request(seq_id, request) => {
-                        let (abort_tx, abort_rx) = futures_channel::oneshot::channel::<()>();
                         let response_tx_clone = response_tx.clone();
                         let service_clone = service.clone();
-                        task_set_handle_clone.add(async move {
-                            let response = service_clone.execute(seq_id, abort_rx, request).await;
+                        if S::is_async_request(&request) {
+                            let (abort_tx, abort_rx) = futures_channel::oneshot::channel::<()>();
+                            server_tasks.borrow_mut().insert(seq_id, abort_tx);
+
+                            task_set_handle_clone.add(async move {
+                                let response =
+                                    service_clone.execute_async(seq_id, abort_rx, request).await;
+                                response_tx_clone.unbounded_send(response).unwrap();
+                                Ok(())
+                            });
+                        } else {
+                            let response = service_clone.execute(seq_id, request);
                             response_tx_clone.unbounded_send(response).unwrap();
-                            Ok(())
-                        });
+                        }
                     }
-                    // Message::Abort(seq_id) => {
-                    //     let _ = abort_tx.send(());
-                    // }
+                    Message::Abort(seq_id) => {
+                        if let Some(abort_tx) = server_tasks.borrow_mut().remove(&seq_id) {
+                            let _ = abort_tx.send(());
+                        }
+                    }
                     _ => panic!("server received a client message"),
                 }
             }
             Ok(())
         };
 
-        let (abort_tx, mut abort_rx) = futures_channel::mpsc::unbounded::<usize>();
+        // let (abort_tx, mut abort_rx) = futures_channel::mpsc::unbounded::<usize>();
         let transport_outgoing = async move {
             loop {
                 futures_util::select! {
                     maybe_response = response_rx.next() => {
                         if let Some((seq_id, maybe_response)) = maybe_response {
-                            if let Some(response) = maybe_response {
-                                let msg = bincode::serialize(&Message::<(), <S as service::Service>::Response>::Response(seq_id, response)).unwrap();
-                                let _ = transport_tx.send(msg).await;
+                            if server_tasks_cloned.borrow_mut().remove(&seq_id).is_some() {
+                                if let Some(response) = maybe_response {
+                                    let msg = bincode::serialize(&Message::<(), <S as service::Service>::Response>::Response(seq_id, response)).unwrap();
+                                    let _ = transport_tx.send(msg).await;
+                                }
                             }
+                        }
+                        else {
+                            break;
                         }
                     }
                 }
@@ -269,6 +293,9 @@ where
             futures_channel::mpsc::unbounded::<(usize, Option<<S as service::Service>::Response>)>(
             );
         let mut task_set_handle_clone = task_set_handle.clone();
+        let server_tasks: Rc<RefCell<HashMap<usize, futures_channel::oneshot::Sender<_>>>> =
+            Default::default();
+        let server_tasks_cloned = server_tasks.clone();
         let service = Rc::new(service);
         let transport_incoming = async move {
             while let Some(array) = transport_rx.next().await {
@@ -283,17 +310,26 @@ where
                         }
                     }
                     Message::Request(seq_id, request) => {
-                        let (abort_tx, abort_rx) = futures_channel::oneshot::channel::<()>();
                         let response_tx_clone = response_tx.clone();
                         let service_clone = service.clone();
-                        task_set_handle_clone.add(async move {
-                            let response = service_clone.execute(seq_id, abort_rx, request).await;
+                        if S::is_async_request(&request) {
+                            let (abort_tx, abort_rx) = futures_channel::oneshot::channel::<()>();
+                            server_tasks.borrow_mut().insert(seq_id, abort_tx);
+                            task_set_handle_clone.add(async move {
+                                let response =
+                                    service_clone.execute_async(seq_id, abort_rx, request).await;
+                                response_tx_clone.unbounded_send(response).unwrap();
+                                Ok(())
+                            });
+                        } else {
+                            let response = service_clone.execute(seq_id, request);
                             response_tx_clone.unbounded_send(response).unwrap();
-                            Ok(())
-                        });
+                        }
                     }
                     Message::Abort(seq_id) => {
-                        // let _ = abort_tx.send(seq_id);
+                        if let Some(abort_tx) = server_tasks.borrow_mut().remove(&seq_id) {
+                            let _ = abort_tx.send(());
+                        }
                     }
                 }
             }
@@ -322,9 +358,11 @@ where
                     }
                     maybe_response = response_rx.next() => {
                         if let Some((seq_id, maybe_response)) = maybe_response {
-                            if let Some(response) = maybe_response {
-                                let msg = bincode::serialize(&Message::<S::Response, S::Response>::Response(seq_id, response)).unwrap();
-                                let _ = transport_tx.send(msg).await;
+                            if server_tasks_cloned.borrow_mut().remove(&seq_id).is_some() {
+                                if let Some(response) = maybe_response {
+                                    let msg = bincode::serialize(&Message::<(), <S as service::Service>::Response>::Response(seq_id, response)).unwrap();
+                                    let _ = transport_tx.send(msg).await;
+                                }
                             }
                         }
                         else {
@@ -334,7 +372,6 @@ where
                     maybe_abort = abort_rx.next() => {
                         if let Some(seq_id) = maybe_abort {
                             let msg = bincode::serialize(&Message::<<C as client::Client>::Request, ()>::Abort(seq_id)).unwrap();
-                            // transport_tx.send(msg).await;
                             transport_tx.send(msg).await;
                         }
                     }
@@ -368,3 +405,30 @@ impl<E> Future for RpcEngine<E> {
         self.task.poll_unpin(cx)
     }
 }
+
+// fn service_receive_request<C, S>(
+//     response_tx: futures_channel::mpsc::UnboundedSender<(usize, Option<S::Response>)>,
+//     seq_id: usize,
+//     request: S::Request,
+//     service: &S,
+//     server_tasks: &Rc<RefCell<HashMap<usize, futures_channel::oneshot::Sender<_>>>>,
+//     task_set_handle_clone: &mut TaskSetHandle,
+// ) where
+//     C: client::Client,
+//     S: service::Service,
+// {
+//     let service_clone = service.clone();
+//     if S::is_async_request(&request) {
+//         let (abort_tx, abort_rx) = futures_channel::oneshot::channel::<()>();
+//         server_tasks.borrow_mut().insert(seq_id, abort_tx);
+
+//         task_set_handle_clone.add(async move {
+//             let response = service_clone.execute_async(seq_id, abort_rx, request).await;
+//             response_tx_clone.unbounded_send(response).unwrap();
+//             Ok(())
+//         });
+//     } else {
+//         let response = service_clone.execute(seq_id, request);
+//         response_tx_clone.unbounded_send(response).unwrap();
+//     }
+// }

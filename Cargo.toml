@@ -3,7 +3,7 @@ members = ["grsrpc", "grsrpc-macro"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Li Datu <datutech@outlook.com>"]
 description = "Bi-directional rust-only RPC"

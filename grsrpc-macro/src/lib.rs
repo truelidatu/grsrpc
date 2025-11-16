@@ -211,7 +211,7 @@ impl<'a> ServiceGenerator<'a> {
         let rpc_fns = rpcs
             .iter()
             .zip(camel_case_idents.iter())
-            .map(|(RpcMethod { attrs, args, transfer, post, ident, output, .. }, camel_case_ident)| {
+            .map(|(RpcMethod { attrs, args, post, ident, output, .. }, camel_case_ident)| {
                 /* sort arguments based on post and transfer attributes */
                 let serialize_arg_idents = args.iter()
                     .filter_map(|arg| match &*arg.pat {
@@ -349,44 +349,17 @@ impl<'a> ServiceGenerator<'a> {
             ..
         } = self;
 
-        let handlers = rpcs.iter()
+        let async_handlers = rpcs.iter()
             .zip(camel_case_idents.iter())
-            .map(|(RpcMethod { is_async, ident, args, transfer, post, output, .. }, camel_case_ident)| {
+            .map(|(RpcMethod { is_async, ident, args, post, .. }, camel_case_ident)| {
                 let serialize_arg_idents = args.iter()
                     .filter_map(|arg| match &*arg.pat {
                         Pat::Ident(ident) if !post.contains(&ident.ident) => Some(&ident.ident),
                         _ => None
                     });
-                let extract_js_args = args.iter()
-                    .filter_map(|arg| match &*arg.pat {
-                        Pat::Ident(ident) if post.contains(&ident.ident) => {
-                            let arg_pat = &arg.pat;
-                            let arg_ty = &arg.ty;
-                            Some(quote! {
-                                let #arg_pat = grsrpc::wasm_bindgen::JsCast::dyn_into::<#arg_ty>(__js_args.shift())
-                                    .unwrap();
-                            })
-                        },
-                        _ => None
-                    });
-                let return_ident = Ident::new("return", output.span());
-                // let return_response = match (post.contains(&return_ident), transfer.contains(&return_ident)) {
-                //     (false, _) => quote! {
-                //         let __post = grsrpc::js_sys::Array::new();
-                //         let __transfer = grsrpc::js_sys::Array::new();
-                //         (Self::Response::#camel_case_ident(__response), __post, __transfer)
-                //     },
-                //     (true, false) => quote! {
-                //         let __post = grsrpc::js_sys::Array::of1(__response.as_ref());
-                //         let __transfer = grsrpc::js_sys::Array::new();
-                //         (Self::Response::#camel_case_ident(()), __post, __transfer)
-                //     },
-                //     (true, true) => quote! {
-                //         let __post = grsrpc::js_sys::Array::of1(__response.as_ref());
-                //         let __transfer = grsrpc::js_sys::Array::of1(__response.as_ref());
-                //         (Self::Response::#camel_case_ident(()), __post, __transfer)
-                //     }
-                // };
+                
+                // let return_ident = Ident::new("return", output.span());
+                
                 let args = args.iter().filter_map(|arg| match &*arg.pat {
                     Pat::Ident(ident) => Some(&ident.ident),
                     _ => None
@@ -394,28 +367,68 @@ impl<'a> ServiceGenerator<'a> {
                 match is_async {
                     true => quote! {
                         Self::Request::#camel_case_ident { #( #serialize_arg_idents ),* } => {
-                            #( #extract_js_args )*
                             let __task =
                                 grsrpc::futures_util::FutureExt::fuse(self.server_impl.#ident(#( #args ),*));
-                            grsrpc::pin_utils::pin_mut!(__task);
-                            grsrpc::futures_util::select! {
-                                _ = __abort_rx => None,
-                                __response = __task => Some({
-                                    // #return_response
-                                    Self::Response::#camel_case_ident(__response)
-                                })
+                                grsrpc::pin_utils::pin_mut!(__task);
+                                grsrpc::futures_util::select! {
+                                    _ = __abort_rx => None,
+                                    __response = __task => Some({
+                                        // #return_response
+                                        Self::Response::#camel_case_ident(__response)
+                                    })
                             }
                         }
                     },
                     false => quote! {
+                        
+                    }
+                }
+            });
+
+        let sync_handlers = rpcs.iter()
+            .zip(camel_case_idents.iter())
+            .map(|(RpcMethod { is_async, ident, args, post, .. }, camel_case_ident)| {
+                let serialize_arg_idents = args.iter()
+                    .filter_map(|arg| match &*arg.pat {
+                        Pat::Ident(ident) if !post.contains(&ident.ident) => Some(&ident.ident),
+                        _ => None
+                    });
+                
+                // let return_ident = Ident::new("return", output.span());
+                
+                let args = args.iter().filter_map(|arg| match &*arg.pat {
+                    Pat::Ident(ident) => Some(&ident.ident),
+                    _ => None
+                });
+                match is_async {
+                    true => quote! {
+                        
+                    },
+                    false => quote! {
                         Self::Request::#camel_case_ident { #( #serialize_arg_idents ),* } => {
-                            // #( #extract_js_args )*
                             let __response = self.server_impl.#ident(#( #args ),*);
                             Some({
                                 // #return_response
                                 Self::Response::#camel_case_ident(__response)
                             })
                         }
+                    }
+                }
+            });
+
+            let request_async_types = rpcs.iter()
+            .zip(camel_case_idents.iter())
+            .map(|(RpcMethod { is_async, args, post, .. }, camel_case_ident)| {
+                let serialize_arg_idents = args.iter()
+                    .filter_map(|arg| match &*arg.pat {
+                        Pat::Ident(ident) if !post.contains(&ident.ident) => Some(&ident.ident),
+                        _ => None
+                    });
+                
+                
+                quote! {
+                    Self::Request::#camel_case_ident { #( #serialize_arg_idents ),* } => {
+                        #is_async
                     }
                 }
             });
@@ -427,16 +440,33 @@ impl<'a> ServiceGenerator<'a> {
             impl<T: #trait_ident> grsrpc::service::Service for #service_ident<T> {
                 type Request = #request_ident;
                 type Response = #response_ident;
-                async fn execute(
+                async fn execute_async(
                     &self,
                     __seq_id: usize,
                     mut __abort_rx: grsrpc::futures_channel::oneshot::Receiver<()>,
                     __request: Self::Request,
                 ) -> (usize, Option<(Self::Response)>) {
                     let __result = match __request {
-                        #( #handlers )*
+                        #( #async_handlers )*
+                        _ => panic!("unexpected request variant, the request handler may be sync"),
                     };
                     (__seq_id, __result)
+                }
+                fn execute(
+                    &self,
+                    __seq_id: usize,
+                    __request: Self::Request,
+                ) -> (usize, Option<(Self::Response)>) {
+                    let __result = match __request {
+                        #( #sync_handlers )*
+                        _ => panic!("unexpected request variant, the request handler may be async"),
+                    };
+                    (__seq_id, __result)
+                }
+                fn is_async_request(request: &Self::Request) -> bool {
+                    match request {
+                        #( #request_async_types )*
+                    }
                 }
             }
             impl<T: #trait_ident> std::convert::From<T> for #service_ident<T> {
