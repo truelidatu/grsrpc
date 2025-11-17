@@ -22,5 +22,6 @@ grsrpc-macro = { path = "../grsrpc-macro", optional = true }
 
 
 [features]
-default = []
+default = ["macros"]
 macros = ["grsrpc-macro"]
+multithread = ["grsrpc-macro/multithread"]
