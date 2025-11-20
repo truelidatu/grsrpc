@@ -13,6 +13,8 @@ use futures_util::{
     future::{self, Shared},
 };
 
+use crate::task_set::TaskSetHandle;
+
 #[doc(hidden)]
 pub trait Client {
     type Request;
@@ -27,6 +29,7 @@ pub type Configuration<Request, Response> = (
     Rc<RefCell<CallbackMap<Response>>>,
     futures_channel::mpsc::UnboundedSender<(usize, Request)>,
     futures_channel::mpsc::UnboundedSender<usize>,
+    TaskSetHandle<()>
     // Rc<dyn Fn(usize, Request) -> Vec<u8>>,
     // Rc<dyn FnMut(usize)>,
 );

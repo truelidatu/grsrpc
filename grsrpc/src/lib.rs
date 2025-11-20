@@ -168,9 +168,9 @@ where
             Ok(())
         };
 
-        let client = C::from((client_callback_map, request_tx, abort_tx));
         task_set_handle.add(transport_incoming);
         task_set_handle.add(transport_outgoing);
+        let client = C::from((client_callback_map, request_tx, abort_tx, task_set_handle));
         let engine = RpcEngine {
             task: task_set.boxed_local(),
         };
@@ -198,6 +198,9 @@ where
         let (response_tx, mut response_rx) =
             futures_channel::mpsc::unbounded::<(usize, Option<<S as service::Service>::Response>)>(
             );
+        let (abortable_response_tx, mut abortable_response_rx) = futures_channel::mpsc::unbounded::<
+            (usize, Option<<S as service::Service>::Response>),
+        >();
 
         let server_tasks: Rc<RefCell<HashMap<usize, futures_channel::oneshot::Sender<_>>>> =
             Default::default();
@@ -210,7 +213,7 @@ where
                     .unwrap()
                 {
                     Message::Request(seq_id, request) => {
-                        let response_tx_clone = response_tx.clone();
+                        let abortable_response_tx_clone = abortable_response_tx.clone();
                         let service_clone = service.clone();
                         if S::is_async_request(&request) {
                             let (abort_tx, abort_rx) = futures_channel::oneshot::channel::<()>();
@@ -219,12 +222,14 @@ where
                             task_set_handle_clone.add(async move {
                                 let response =
                                     service_clone.execute_async(seq_id, abort_rx, request).await;
-                                response_tx_clone.unbounded_send(response).unwrap();
+                                abortable_response_tx_clone
+                                    .unbounded_send(response)
+                                    .unwrap();
                                 Ok(())
                             });
                         } else {
                             let response = service_clone.execute(seq_id, request);
-                            response_tx_clone.unbounded_send(response).unwrap();
+                            response_tx.unbounded_send(response).unwrap();
                         }
                     }
                     Message::Abort(seq_id) => {
@@ -244,6 +249,17 @@ where
                 futures_util::select! {
                     maybe_response = response_rx.next() => {
                         if let Some((seq_id, maybe_response)) = maybe_response {
+                            if let Some(response) = maybe_response {
+                                let msg = bincode::serialize(&Message::<(), <S as service::Service>::Response>::Response(seq_id, response)).unwrap();
+                                let _ = transport_tx.send(msg).await;
+                            }
+                        }
+                        else {
+                            break;
+                        }
+                    }
+                    maybe_abortable_response = abortable_response_rx.next() => {
+                        if let Some((seq_id, maybe_response)) = maybe_abortable_response {
                             if server_tasks_cloned.borrow_mut().remove(&seq_id).is_some() {
                                 if let Some(response) = maybe_response {
                                     let msg = bincode::serialize(&Message::<(), <S as service::Service>::Response>::Response(seq_id, response)).unwrap();
@@ -292,6 +308,9 @@ where
         let (response_tx, mut response_rx) =
             futures_channel::mpsc::unbounded::<(usize, Option<<S as service::Service>::Response>)>(
             );
+        let (abortable_response_tx, mut abortable_response_rx) = futures_channel::mpsc::unbounded::<
+            (usize, Option<<S as service::Service>::Response>),
+        >();
         let mut task_set_handle_clone = task_set_handle.clone();
         let server_tasks: Rc<RefCell<HashMap<usize, futures_channel::oneshot::Sender<_>>>> =
             Default::default();
@@ -310,20 +329,23 @@ where
                         }
                     }
                     Message::Request(seq_id, request) => {
-                        let response_tx_clone = response_tx.clone();
+                        // let response_tx_clone = response_tx.clone();
                         let service_clone = service.clone();
                         if S::is_async_request(&request) {
+                            let abortable_response_tx_clone = abortable_response_tx.clone();
                             let (abort_tx, abort_rx) = futures_channel::oneshot::channel::<()>();
                             server_tasks.borrow_mut().insert(seq_id, abort_tx);
                             task_set_handle_clone.add(async move {
                                 let response =
                                     service_clone.execute_async(seq_id, abort_rx, request).await;
-                                response_tx_clone.unbounded_send(response).unwrap();
+                                abortable_response_tx_clone
+                                    .unbounded_send(response)
+                                    .unwrap();
                                 Ok(())
                             });
                         } else {
                             let response = service_clone.execute(seq_id, request);
-                            response_tx_clone.unbounded_send(response).unwrap();
+                            response_tx.unbounded_send(response).unwrap();
                         }
                     }
                     Message::Abort(seq_id) => {
@@ -358,6 +380,17 @@ where
                     }
                     maybe_response = response_rx.next() => {
                         if let Some((seq_id, maybe_response)) = maybe_response {
+                            if let Some(response) = maybe_response {
+                                let msg = bincode::serialize(&Message::<(), <S as service::Service>::Response>::Response(seq_id, response)).unwrap();
+                                let _ = transport_tx.send(msg).await;
+                            }
+                        }
+                        else {
+                            response_closed = true;
+                        }
+                    }
+                    maybe_abortable_response = abortable_response_rx.next() => {
+                        if let Some((seq_id, maybe_response)) = maybe_abortable_response {
                             if server_tasks_cloned.borrow_mut().remove(&seq_id).is_some() {
                                 if let Some(response) = maybe_response {
                                     let msg = bincode::serialize(&Message::<(), <S as service::Service>::Response>::Response(seq_id, response)).unwrap();
@@ -385,9 +418,9 @@ where
             Ok(())
         };
 
-        let client = C::from((client_callback_map, request_tx, abort_tx));
         task_set_handle.add(transport_incoming);
         task_set_handle.add(transport_outgoing);
+        let client = C::from((client_callback_map, request_tx, abort_tx, task_set_handle));
         let engine = RpcEngine {
             task: task_set.boxed_local(),
         };

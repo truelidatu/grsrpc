@@ -307,6 +307,7 @@ impl<'a> ServiceGenerator<'a> {
                     request_tx: grsrpc::futures_channel::mpsc::UnboundedSender<(usize, #request_ident)>,
                     abort_tx: grsrpc::futures_channel::mpsc::UnboundedSender<usize>,
                     callback_map: std::rc::Rc<std::cell::RefCell<grsrpc::client::CallbackMap<#response_ident>>>,
+                    task_set_handle: grsrpc::task_set::TaskSetHandle<()>,
                     seq_id: std::rc::Rc<std::cell::RefCell<usize>>,
                 }
                 impl std::fmt::Debug for #client_ident {
@@ -321,12 +322,13 @@ impl<'a> ServiceGenerator<'a> {
                 }
                 impl From<grsrpc::client::Configuration<#request_ident, #response_ident>>
                     for #client_ident {
-                    fn from((callback_map, request_tx, abort_tx):
+                    fn from((callback_map, request_tx, abort_tx, task_set_handle):
                         grsrpc::client::Configuration<#request_ident, #response_ident>) -> Self {
                         Self {
                             callback_map,
                             request_tx,
                             abort_tx,
+                            task_set_handle,
                             seq_id: std::default::Default::default()
                         }
                     }
