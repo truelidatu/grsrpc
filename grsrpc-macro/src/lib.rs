@@ -371,13 +371,13 @@ impl<'a> ServiceGenerator<'a> {
                         Self::Request::#camel_case_ident { #( #serialize_arg_idents ),* } => {
                             let __task =
                                 grsrpc::futures_util::FutureExt::fuse(self.server_impl.#ident(#( #args ),*));
-                                grsrpc::pin_utils::pin_mut!(__task);
-                                grsrpc::futures_util::select! {
-                                    _ = __abort_rx => None,
-                                    __response = __task => Some({
-                                        // #return_response
-                                        Self::Response::#camel_case_ident(__response)
-                                    })
+                            grsrpc::pin_utils::pin_mut!(__task);
+                            grsrpc::futures_util::select! {
+                                _ = __abort_rx => None,
+                                __response = __task => Some({
+                                    // #return_response
+                                    Self::Response::#camel_case_ident(__response)
+                                })
                             }
                         }
                     },

@@ -103,6 +103,28 @@ impl<C, T> Builder<C, (), T> {
         }
     }
 }
+impl<C, T> Builder<C, (), T> {
+    pub fn with_multi_thread_service<S: service::Service, I, F>(
+        self,
+        implementation: I,
+        spawner: F,
+    ) -> Builder<C, S, T>
+    where
+        F: Fn(Pin<Box<dyn Future<Output = ()> + Send + 'static>>) -> (),
+        I: Send + 'static,
+        (I, F): Into<S>,
+    {
+        let service = (implementation, spawner).into();
+        let Builder {
+            transport, client, ..
+        } = self;
+        Builder {
+            transport,
+            client,
+            service,
+        }
+    }
+}
 
 impl<C, T, E> Builder<C, (), T>
 where

@@ -21,3 +21,7 @@ pub trait Service {
 
     fn is_async_request(request: &Self::Request) -> bool;
 }
+
+pub type MultiThreadSpawner = Box<dyn Fn(dyn Future<Output = ()> + Send + 'static) -> ()>;
+
+pub type ServiceConfiguration<T> = (T, Option<MultiThreadSpawner>);
