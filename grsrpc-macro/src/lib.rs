@@ -41,10 +41,13 @@ struct RpcMethod {
     output: ReturnType,
 }
 
+
 struct ServiceGenerator<'a> {
     trait_ident: &'a Ident,
+    multi_thread_service_ident: &'a Ident,
     service_ident: &'a Ident,
     client_ident: &'a Ident,
+    multi_thread_client_ident: &'a Ident,
     request_ident: &'a Ident,
     response_ident: &'a Ident,
     vis: &'a Visibility,
@@ -339,6 +342,273 @@ impl<'a> ServiceGenerator<'a> {
             }
     }
 
+    fn struct_multi_thread_client(&self) -> TokenStream2 {
+        let &Self {
+            vis,
+            client_ident,
+            multi_thread_client_ident,
+            request_ident,
+            response_ident,
+            camel_case_idents,
+            rpcs,
+            ..
+        } = self;
+
+        let client_relay_actor_dispatches = rpcs
+            .iter()
+            .zip(camel_case_idents.iter())
+            .map(|(RpcMethod { attrs, args, post, ident, output, .. }, camel_case_ident)| {
+                /* sort arguments based on post and transfer attributes */
+                let serialize_arg_idents = args.iter()
+                    .filter_map(|arg| match &*arg.pat {
+                        Pat::Ident(ident) if !post.contains(&ident.ident) => Some(&ident.ident),
+                        _ => None
+                    });
+                // let post_arg_idents = args.iter()
+                //     .filter_map(|arg| match &*arg.pat {
+                //         Pat::Ident(ident) if post.contains(&ident.ident) => Some(&ident.ident),
+                //         _ => None
+                //     });
+                // let transfer_arg_idents = args.iter()
+                //     .filter_map(|arg| match &*arg.pat {
+                //         Pat::Ident(ident) if transfer.contains(&ident.ident) => Some(&ident.ident),
+                //         _ => None
+                //     });
+
+                let return_type = match output {
+                    ReturnType::Type(_, ref ty) => quote! {
+                        grsrpc::client::RequestFuture<#ty>
+                    },
+                    _ => quote!(())
+                };
+                let maybe_register_callback = match output {
+                    ReturnType::Type(_, _) => quote! {
+                        let (__response_tx, __response_rx) =
+                            grsrpc::futures_channel::oneshot::channel();
+                        self.callback_map.borrow_mut().insert(__seq_id, __response_tx);
+                    },
+                    _ => Default::default()
+                };
+
+                // TODO: what is post?
+                let unpack_response = if post.contains(&Ident::new("return", output.span())) {
+                    // let unit_output: &Type = &parse_quote!(());
+                    // let output = match output {
+                    //     ReturnType::Type(_, ref ty) => ty,
+                    //     _ => unit_output
+                    // };
+                    // quote! {
+                    //     let (_, __post_response) = response;
+                    //     grsrpc::wasm_bindgen::JsCast::dyn_into::<#output>(__post_response.shift())
+                    //         .unwrap()
+                    // }
+                    quote!{}
+                } else {
+                    quote! {
+                        let #response_ident::#camel_case_ident(__inner) = response else {
+                            panic!("received incorrect response variant")
+                        };
+                        __inner
+                    }
+                };
+
+                let serialize_arg_idents_clone = serialize_arg_idents.clone();
+                quote! {
+                    (__res_tx, mut __abort_relay_rx, #request_ident::#camel_case_ident { #(#serialize_arg_idents_clone),* }) => {
+                        task_set_handle.add(async move {
+                            
+                            let __task =
+                                grsrpc::futures_util::FutureExt::fuse(local_client_clone.#ident(#(#serialize_arg_idents),*));
+                            grsrpc::pin_utils::pin_mut!(__task);
+                            let __res = grsrpc::futures_util::select! {
+                                _ = __abort_relay_rx => None,
+                                __res = __task => {
+                                    Some(__res)
+                                }
+                            };
+                            if let Some(__res) = __res {
+                                let _ = __res_tx.send(#response_ident::#camel_case_ident(__res));
+                            }
+
+                            Ok(())
+                        });
+                    }   
+                }
+            });
+
+        let client_relay_actor_fn = quote!{
+            async fn client_relay_actor(
+                mut relay_rx: grsrpc::futures_channel::mpsc::UnboundedReceiver<(
+                    grsrpc::futures_channel::oneshot::Sender<#response_ident>,
+                    grsrpc::futures_channel::oneshot::Receiver<()>,
+                    #request_ident,
+                )>,
+                client: #client_ident,
+                mut task_set_handle: grsrpc::task_set::TaskSetHandle<()>,
+            ) -> Result<(), ()> {
+                while let Some(request) = relay_rx.next().await {
+                    let local_client_clone = client.clone();
+
+                    match request {
+                        #(#client_relay_actor_dispatches)*
+                    }
+                }
+                Ok(())
+            }        
+        };
+
+        let rpc_fns = rpcs
+            .iter()
+            .zip(camel_case_idents.iter())
+            .map(|(RpcMethod { attrs, args, post, ident, output, .. }, camel_case_ident)| {
+                /* sort arguments based on post and transfer attributes */
+                let serialize_arg_idents = args.iter()
+                    .filter_map(|arg| match &*arg.pat {
+                        Pat::Ident(ident) if !post.contains(&ident.ident) => Some(&ident.ident),
+                        _ => None
+                    });
+                // let post_arg_idents = args.iter()
+                //     .filter_map(|arg| match &*arg.pat {
+                //         Pat::Ident(ident) if post.contains(&ident.ident) => Some(&ident.ident),
+                //         _ => None
+                //     });
+                // let transfer_arg_idents = args.iter()
+                //     .filter_map(|arg| match &*arg.pat {
+                //         Pat::Ident(ident) if transfer.contains(&ident.ident) => Some(&ident.ident),
+                //         _ => None
+                //     });
+
+                let return_type = match output {
+                    ReturnType::Type(_, ref ty) => quote! {
+                        grsrpc::client::MultiThreadRequestFuture<#ty>
+                    },
+                    _ => quote!(())
+                };
+                let maybe_register_callback = match output {
+                    ReturnType::Type(_, _) => quote! {
+                        let (__response_tx, __response_rx) =
+                            grsrpc::futures_channel::oneshot::channel();
+                        self.callback_map.borrow_mut().insert(__seq_id, __response_tx);
+                    },
+                    _ => Default::default()
+                };
+
+                // TODO: what is post?
+                let unpack_response = if post.contains(&Ident::new("return", output.span())) {
+                    // let unit_output: &Type = &parse_quote!(());
+                    // let output = match output {
+                    //     ReturnType::Type(_, ref ty) => ty,
+                    //     _ => unit_output
+                    // };
+                    // quote! {
+                    //     let (_, __post_response) = response;
+                    //     grsrpc::wasm_bindgen::JsCast::dyn_into::<#output>(__post_response.shift())
+                    //         .unwrap()
+                    // }
+                    quote!{}
+                } else {
+                    quote! {
+                        let #response_ident::#camel_case_ident(__inner) = response else {
+                            panic!("received incorrect response variant")
+                        };
+                        __inner
+                    }
+                };
+
+                let maybe_unpack_and_return_future = match output {
+                    ReturnType::Type(_, _) => quote! {
+                        let __response_future = grsrpc::futures_util::FutureExt::map(
+                            __res_rx,
+                            |response| {
+                                let response = response.unwrap();
+                                #unpack_response
+                            }
+                        );
+                        let __abort_relay_tx = self.abort_tx.clone();
+                        grsrpc::client::MultiThreadRequestFuture::new(
+                            __response_future,
+                            std::boxed::Box::new(move || (__abort_relay_tx).unbounded_send(()).unwrap()))
+                    },
+                    _ => Default::default()
+                };
+
+                quote! {
+                    #( #attrs )*
+                    #vis fn #ident(
+                        &self,
+                        #( #args ),*
+                    ) -> #return_type {
+                        
+                        let __request = #request_ident::#camel_case_ident {
+                            #( #serialize_arg_idents ),*
+                        };
+                        let (__res_tx, __res_rx) = grsrpc::futures_channel::oneshot::channel();
+                        let (__abort_relay_tx, __abort_relay_rx) = grsrpc::futures_channel::oneshot::channel();
+                        self.relay_tx
+                            .unbounded_send((__res_tx, __abort_relay_rx, __request))
+                            .unwrap();
+                        let __response_future = grsrpc::futures_util::FutureExt::map(
+                            __res_rx,
+                            |response| {
+                                let response = response.unwrap();
+                                #unpack_response
+                            }
+                        );
+                        grsrpc::client::MultiThreadRequestFuture::new(
+                            __response_future,
+                            std::boxed::Box::new(move || __abort_relay_tx.send(()).unwrap()))                       
+                    }
+                }
+            });
+
+        quote! {
+                #[derive(core::clone::Clone)]
+                #vis struct #multi_thread_client_ident {
+                    relay_tx: grsrpc::futures_channel::mpsc::UnboundedSender<(
+                        grsrpc::futures_channel::oneshot::Sender<#response_ident>,
+                        grsrpc::futures_channel::oneshot::Receiver<()>,
+                        #request_ident,
+                    )>,
+                }
+                impl std::fmt::Debug for #multi_thread_client_ident {
+                    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        formatter.debug_struct(std::stringify!(#multi_thread_client_ident))
+                            .finish()
+                    }
+                }
+                impl grsrpc::client::Client for #multi_thread_client_ident {
+                    type Request = #request_ident;
+                    type Response = #response_ident;
+                }
+                impl From<grsrpc::client::Configuration<#request_ident, #response_ident>>
+                    for #multi_thread_client_ident {
+                    fn from((callback_map, request_tx, abort_tx, mut task_set_handle):
+                        grsrpc::client::Configuration<#request_ident, #response_ident>) -> Self {
+                        use grsrpc::futures_util::StreamExt;
+
+                        #client_relay_actor_fn
+
+                        let task_set_handle_clone = task_set_handle.clone();
+                        let local_client =
+                            #client_ident::from((callback_map, request_tx, abort_tx, task_set_handle_clone));
+                        let (relay_tx, relay_rx) = grsrpc::futures_channel::mpsc::unbounded::<(
+                            grsrpc::futures_channel::oneshot::Sender<#response_ident>,
+                            grsrpc::futures_channel::oneshot::Receiver<()>,
+                            #request_ident,
+                        )>();
+                        let task_set_handle_clone = task_set_handle.clone();
+
+                        task_set_handle.add(client_relay_actor(relay_rx, local_client, task_set_handle_clone));
+                        Self { relay_tx }
+                    }
+                }
+                impl #multi_thread_client_ident {
+                    #( #rpc_fns )*
+                }
+            }
+    }
+
+
     fn struct_server(&self) -> TokenStream2 {
         let &Self {
             vis,
@@ -482,13 +752,17 @@ impl<'a> ServiceGenerator<'a> {
 
 impl<'a> ToTokens for ServiceGenerator<'a> {
     fn to_tokens(&self, output: &mut TokenStream2) {
-        output.extend(vec![
+        let mut token_stream_list = vec![
             self.enum_request(),
             self.enum_response(),
             self.trait_service(),
             self.struct_client(),
             self.struct_server(),
-        ])
+        ];
+        if cfg!(feature = "multi_thread") {
+            token_stream_list.push(self.struct_multi_thread_client());
+        }
+        output.extend(token_stream_list.into_iter());
     }
 }
 
@@ -655,8 +929,10 @@ pub fn service(_attr: TokenStream, input: TokenStream) -> TokenStream {
 
     ServiceGenerator {
         trait_ident: ident,
+        multi_thread_service_ident: &format_ident!("{}MultiThreadService", ident),
         service_ident: &format_ident!("{}Service", ident),
         client_ident: &format_ident!("{}Client", ident),
+        multi_thread_client_ident: &format_ident!("{}MultiThreadClient", ident),
         request_ident: &format_ident!("{}Request", ident),
         response_ident: &format_ident!("{}Response", ident),
         vis,

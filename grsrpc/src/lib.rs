@@ -103,6 +103,8 @@ impl<C, T> Builder<C, (), T> {
         }
     }
 }
+
+#[cfg(feature = "multi_thread")]
 impl<C, T> Builder<C, (), T> {
     pub fn with_multi_thread_service<S: service::Service, I, F>(
         self,
