@@ -32,6 +32,8 @@ pub use futures_util;
 pub use pin_utils;
 #[doc(hidden)]
 pub use serde;
+#[doc(hidden)]
+pub use async_trait;
 
 #[cfg(feature = "macros")]
 pub use grsrpc_macro::service;

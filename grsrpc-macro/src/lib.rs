@@ -4,15 +4,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
-    braced,
-    ext::IdentExt,
-    parenthesized,
-    parse::{Parse, ParseStream},
-    parse_macro_input, parse_quote,
-    punctuated::Punctuated,
-    spanned::Spanned,
-    token::Comma,
-    Attribute, FnArg, Ident, Meta, NestedMeta, Pat, PatType, ReturnType, Token, Type, Visibility,
+    Attribute, FnArg, Ident, Lit, Meta, MetaNameValue, NestedMeta, Pat, PatType, ReturnType, Token, Type, Visibility, braced, ext::IdentExt, parenthesized, parse::{Parse, ParseStream}, parse_macro_input, parse_quote, punctuated::Punctuated, spanned::Spanned, token::Comma
 };
 
 macro_rules! extend_errors {
@@ -43,6 +35,7 @@ struct RpcMethod {
 
 
 struct ServiceGenerator<'a> {
+    mode: String,
     trait_ident: &'a Ident,
     multi_thread_service_ident: &'a Ident,
     service_ident: &'a Ident,
@@ -188,15 +181,18 @@ impl<'a> ServiceGenerator<'a> {
                 #( #rpc_fns )*
             }
 
-            impl<T> #trait_ident for std::sync::Arc<T> where T: #trait_ident {
-                #( #forward_fns )*
-            }
-            impl<T> #trait_ident for std::boxed::Box<T> where T: #trait_ident {
-                #( #forward_fns )*
-            }
-            impl<T> #trait_ident for std::rc::Rc<T> where T: #trait_ident {
-                #( #forward_fns )*
-            }
+            // #( #attrs )*
+            // impl<T> #trait_ident for std::sync::Arc<T> where T: #trait_ident {
+            //     #( #forward_fns )*
+            // }
+
+            // impl<T> #trait_ident for std::boxed::Box<T> where T: #trait_ident {
+            //     #( #forward_fns )*
+            // }
+            
+            // impl<T> #trait_ident for std::rc::Rc<T> where T: #trait_ident {
+            //     #( #forward_fns )*
+            // }
         }
     }
 
@@ -748,6 +744,166 @@ impl<'a> ServiceGenerator<'a> {
             }
         }
     }
+    
+    fn struct_multi_thread_server(&self) -> TokenStream2 {
+        let &Self {
+            vis,
+            trait_ident,
+            service_ident,
+            multi_thread_service_ident,
+            request_ident,
+            response_ident,
+            camel_case_idents,
+            rpcs,
+            ..
+        } = self;
+
+        let async_handlers = rpcs.iter()
+            .zip(camel_case_idents.iter())
+            .map(|(RpcMethod { is_async, ident, args, post, .. }, camel_case_ident)| {
+                let serialize_arg_idents = args.iter()
+                    .filter_map(|arg| match &*arg.pat {
+                        Pat::Ident(ident) if !post.contains(&ident.ident) => Some(&ident.ident),
+                        _ => None
+                    });
+                
+                // let return_ident = Ident::new("return", output.span());
+                
+                let args = args.iter().filter_map(|arg| match &*arg.pat {
+                    Pat::Ident(ident) => Some(&ident.ident),
+                    _ => None
+                });
+                match is_async {
+                    true => quote! {
+                        Self::Request::#camel_case_ident { #( #serialize_arg_idents ),* } => {
+                            let (res_tx, res_rx) = grsrpc::futures_channel::oneshot::channel();
+                            let impl_clone = self.server_impl.clone();
+                            (self.spawner)(Box::pin(async move {
+                                let __task =
+                                    grsrpc::futures_util::FutureExt::fuse(impl_clone.#ident(#( #args ),*));
+                                grsrpc::pin_utils::pin_mut!(__task);
+                                let res = grsrpc::futures_util::select! {
+                                    _ = __abort_rx => None,
+                                    __response = __task => Some({
+                                        // #return_response
+                                        Self::Response::#camel_case_ident(__response)
+                                    })
+                                };
+                                // TODO: handle error
+                                let _ = res_tx.send(res);
+                            }));
+                            res_rx.await.unwrap_or(None)
+                        }
+                    },
+                    false => quote! {
+                        
+                    }
+                }
+            });
+
+        let sync_handlers = rpcs.iter()
+            .zip(camel_case_idents.iter())
+            .map(|(RpcMethod { is_async, ident, args, post, .. }, camel_case_ident)| {
+                let serialize_arg_idents = args.iter()
+                    .filter_map(|arg| match &*arg.pat {
+                        Pat::Ident(ident) if !post.contains(&ident.ident) => Some(&ident.ident),
+                        _ => None
+                    });
+                
+                // let return_ident = Ident::new("return", output.span());
+                
+                let args = args.iter().filter_map(|arg| match &*arg.pat {
+                    Pat::Ident(ident) => Some(&ident.ident),
+                    _ => None
+                });
+                match is_async {
+                    true => quote! {
+                        
+                    },
+                    false => quote! {
+                        Self::Request::#camel_case_ident { #( #serialize_arg_idents ),* } => {
+                            let __response = self.server_impl.#ident(#( #args ),*);
+                            Some({
+                                // #return_response
+                                Self::Response::#camel_case_ident(__response)
+                            })
+                        }
+                    }
+                }
+            });
+
+            let request_async_types = rpcs.iter()
+            .zip(camel_case_idents.iter())
+            .map(|(RpcMethod { is_async, args, post, .. }, camel_case_ident)| {
+                let serialize_arg_idents = args.iter()
+                    .filter_map(|arg| match &*arg.pat {
+                        Pat::Ident(ident) if !post.contains(&ident.ident) => Some(&ident.ident),
+                        _ => None
+                    });
+                
+                
+                quote! {
+                    Self::Request::#camel_case_ident { #( #serialize_arg_idents ),* } => {
+                        #is_async
+                    }
+                }
+            });
+
+        quote! {
+            #vis struct #multi_thread_service_ident<T, F> 
+            where
+                F: Fn(std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>>) -> (),
+            {
+                server_impl: std::sync::Arc<T>,
+                spawner: F,
+            }
+            impl<T: #trait_ident, F> grsrpc::service::Service for #multi_thread_service_ident<T, F> 
+            where
+                F: Fn(std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>>) -> (),
+                T: #trait_ident + Send + Sync + 'static,
+            {       
+                type Request = #request_ident;
+                type Response = #response_ident;
+                async fn execute_async(
+                    &self,
+                    __seq_id: usize,
+                    mut __abort_rx: grsrpc::futures_channel::oneshot::Receiver<()>,
+                    __request: Self::Request,
+                ) -> (usize, Option<(Self::Response)>) {
+                    let __result = match __request {
+                        #( #async_handlers )*
+                        _ => panic!("unexpected request variant, the request handler may be sync"),
+                    };
+                    (__seq_id, __result)
+                }
+                fn execute(
+                    &self,
+                    __seq_id: usize,
+                    __request: Self::Request,
+                ) -> (usize, Option<(Self::Response)>) {
+                    let __result = match __request {
+                        #( #sync_handlers )*
+                        _ => panic!("unexpected request variant, the request handler may be async"),
+                    };
+                    (__seq_id, __result)
+                }
+                fn is_async_request(request: &Self::Request) -> bool {
+                    match request {
+                        #( #request_async_types )*
+                    }
+                }
+            }
+            impl<T: #trait_ident, F> std::convert::From<(T, F)> for #multi_thread_service_ident<T, F> 
+            where
+                F: Fn(std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>>) -> (),
+            {
+                fn from((server_impl, spawner): (T, F)) -> Self {
+                    Self { server_impl: std::sync::Arc::new(server_impl), spawner }
+                }
+            }
+        }
+    }
+
 }
 
 impl<'a> ToTokens for ServiceGenerator<'a> {
@@ -760,7 +916,10 @@ impl<'a> ToTokens for ServiceGenerator<'a> {
             self.struct_server(),
         ];
         if cfg!(feature = "multi_thread") {
-            token_stream_list.push(self.struct_multi_thread_client());
+            if self.mode == "multi_thread" {
+                token_stream_list.push(self.struct_multi_thread_client());
+                token_stream_list.push(self.struct_multi_thread_server());
+            }
         }
         output.extend(token_stream_list.into_iter());
     }
@@ -914,7 +1073,7 @@ impl Parse for RpcMethod {
 
 
 #[proc_macro_attribute]
-pub fn service(_attr: TokenStream, input: TokenStream) -> TokenStream {
+pub fn service(attr: TokenStream, input: TokenStream) -> TokenStream {
     let Service {
         ref attrs,
         ref vis,
@@ -922,12 +1081,38 @@ pub fn service(_attr: TokenStream, input: TokenStream) -> TokenStream {
         ref rpcs,
     } = parse_macro_input!(input as Service);
 
+    let attr_args = parse_macro_input!(attr as syn::AttributeArgs);
+    // Default values
+    let mut mode = "single_thread".to_string(); // or use an enum
+
+    // Parse named arguments like `mode = multi_thread`
+    for arg in attr_args {
+        match arg {
+            syn::NestedMeta::Meta(Meta::NameValue(MetaNameValue { path, lit: Lit::Str(lit_str), .. })) => {
+                if path.is_ident("mode") {
+                    mode = lit_str.value();
+                    // Or better: parse into an enum
+                } else {
+                    return syn::Error::new_spanned(path, "unknown argument")
+                        .to_compile_error()
+                        .into();
+                }
+            }
+            other => {
+                return syn::Error::new_spanned(other, "expected `key = value`")
+                    .to_compile_error()
+                    .into();
+            }
+        }
+    }
+
     let camel_case_fn_names: &Vec<_> = &rpcs
         .iter()
         .map(|rpc| snake_to_camel(&rpc.ident.unraw().to_string()))
         .collect();
 
     ServiceGenerator {
+        mode,
         trait_ident: ident,
         multi_thread_service_ident: &format_ident!("{}MultiThreadService", ident),
         service_ident: &format_ident!("{}Service", ident),

@@ -19,7 +19,7 @@ futures-core = "0.3.30"
 futures-util = { version = "0.3.30", features = ["channel", "sink"] }
 serde = { version = "1.0.193", features = ["derive"] }
 grsrpc-macro = { path = "../grsrpc-macro", optional = true }
-
+async-trait = "0.1"
 
 [features]
 default = ["macros"]
